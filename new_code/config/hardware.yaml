@@ -1,0 +1,68 @@
+# Hardware/structural parameters shared by C++ (via tools/gen_config_headers.py,
+# which regenerates NoC_sim/noc_param.h and DRAM_sim/dram_params.h's bandwidth
+# fields from this file) and Python codegen (via
+# inst_gen/gen_code/config_yaml.py). Phase 1 of the params->YAML migration:
+# only the fields that were duplicated or collided across modules live here so
+# far -- see new_code/DRAM_sim/dram_params.h / NoC_sim/noc_param.h for the
+# remaining module-local constants still pending Phase 2.
+
+noc:
+  width: 8                          # Network width (X dimension), core mesh only.
+                                     # Acc8x8/NoCSim support any width/height (rectangular
+                                     # meshes too) under the default "XY" topology; only
+                                     # "TORUS_XY" requires width == height. Also update the
+                                     # 5 inst_gen/gen_code/gen_mlp_*.py scripts' generated
+                                     # instruction directories to match (they already derive
+                                     # NUM_CORES from these two fields via config_yaml.py).
+  height: 8                         # Network height (Y dimension), core mesh only. See width's
+                                     # comment above -- both together determine total core count.
+  num_offchip_nodes: 8               # Phase 6: one off-chip DRAM node per mesh row -- this
+                                      # count is independent of `height` above (not auto-
+                                      # derived); if you change `height`, reconsider this value
+                                      # too. Off-chip DRAM is inert for the student MLP pipeline
+                                      # (local_dram_capacity_bytes stays 0), so a stale value
+                                      # here doesn't break that pipeline, only the "one per row"
+                                      # framing becomes imprecise.
+  lanes: 8                           # Data lanes per link
+  buffer_depth: 4                    # Router buffer depth
+  packet_size: 32                    # Default packet size in flits
+  max_hops: 9                        # Soft/documentation constant (corner-to-corner XY is 14, not enforced)
+  offchip_link_latency: 20           # Fixed cycles for the off-chip link leg (not tracked in alloutq)
+  endpoint_rule: transit             # Research switch S1 (NoCSim endpoint_port): `transit` = today, a source and every
+                                     # destination are held for a packet's whole transit; `port` = per-node inject / eject
+                                     # ports reserved like link ports (core-to-core only; an off-chip packet is FATAL)
+  multicast_tree: false              # Research switch S2 (NoCSim mc_tree): false = today, a link shared by k destinations
+                                     # of one multicast is reserved k times; true = each tree link once (a bug fix)
+  multicast_fork: sync               # S2's fork mode (NoCSim mc_fork_async; needs multicast_tree + endpoint_rule port):
+                                     # sync = forwarding through an intermediate destination waits for its eject;
+                                     # async = it does not, the local copy is ejected apart
+  port_finish_fix: false             # Research switch S3 (NoCSim pf_fix): false = today, a port entry already in service
+                                     # is restarted at `now` and charged in full again; true = free when its last entry ends
+  backfill: false                    # Research switch S4 (NoCSim backfill; needs endpoint_rule: port): false = today, a hop
+                                     # starts after the end of its port's queue; true = the earliest gap that fits
+  offchip_fetch_pkt_id_base: 20000000  # (packet-ID budget redesign): raised 100x from 200000 to stay clear of DYNAMIC_PKT_BASE's new ceiling (5000000+64*20480=6310720) after DYNAMIC_PKT_BASE/DYNAMIC_POOL_SIZE were raised for the prefill ring refactor's packet needs. (Prior raise: Bug F, 2026-08-13, 100000->200000.)
+  offchip_fetch_pkt_id_pool_size: 64
+  offchip_writeback_pkt_id_base: 21000000  # Phase A: separate pool from fetch's, so a core's in-flight KV eviction write-back and off-chip fetch never share a packet_id. Raised 100x alongside offchip_fetch_pkt_id_base (this round; prior raise was Bug F, 2026-08-13, 110000->210000)
+  offchip_writeback_pkt_id_pool_size: 64
+  fill_data_id_base: 2000000  # Phase F: synthetic data_pool_ landing-slot namespace for fill requests (no real instruction data_id to reuse, unlike Flow A's off-chip fetch). Far above MainCtrl's DYNAMIC_DATA_ID_BASE=1000000 (max range 1000000+64*256=1016384), so there is no numeric overlap risk.
+  fill_data_id_pool_size: 64
+  congestion_threshold_low: 0.3
+  congestion_threshold_high: 0.7
+  router_delay: 1                    # Cycles per router hop
+  link_delay: 1                      # Cycles per link traversal
+
+dram:
+  num_src: 2
+  bus_width: 64                      # bus width in bits
+  bus_bandwidth: 64                  # elements transferred per clock cycle (local DRAM)
+  rail_overhead: 5                   # Phase 3c: cross-core DRAM rail fixed overhead cycles
+  rail_bandwidth: 64                 # Phase 3c: cross-core DRAM rail elements/cycle
+  offchip_overhead: 15               # Phase 6b: off-chip DRAM fixed per-transfer overhead cycles
+  offchip_bandwidth: 32              # Phase 6b: off-chip DRAM elements/cycle
+  local_capacity_bytes: 536870912    # Phase D: 512 MB/core, 64 core = 32 GB total HBM. 0 disables capacity tracking (pre-Phase-D behavior); testbenches opt in explicitly via Acc8x8's local_dram_capacity_bytes constructor arg -- this constant is not applied automatically.
+
+cache:
+  dual_port: true                    # TEMP DIAG 2026-07-16: true = 1 read + 1 write may complete in the same trigger cycle; false = mutually exclusive (default). Moot when arbiter_mode: parallel (every port already gets both).
+  max_capacity_bytes: 2097152        # 2 MiB; total resident data (elem_count * elem_bits/8, summed across cache_data) enforced via pend/retry, no eviction
+  bus_width_bits: 256                 # bits/cycle; latency_cal = data_bits(data) / bus_width_bits (floor, minimum 1 cycle)
+  arbiter_mode: parallel                # "default" = fixed-priority scan (port 0..N-1) with anti-starvation aging; "parallel" = every port completes its own read+write every cycle

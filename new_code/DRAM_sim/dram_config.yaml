@@ -1,0 +1,30 @@
+AddrMapping: RoBaRaCoCh
+DRAM_REQ_FIFO_DEPTH: 1
+CHANNEL_BUFFER_DEPTH: 1
+REQ_FIFO_DEPTH: 16
+BANDWIDTH: 1024
+MemmorySystem:
+  org:
+    subarray: 1
+    channel_width: 1024
+    channel: 4
+    rank: 1
+    bank: 4
+    row: 16384
+    column: 16
+  timing:
+    nCCDL: 4
+    nCCDS: 2
+    nRFC: 110
+    nRCD: 8
+    nRAS: 11
+    nRP: 4
+    nRC: 14
+    nCL: 7
+  clock_ratio: 1
+latency_estimator:
+  row_hit: 50
+  row_miss: 100
+  row_conflict: 120
+  max_concurrent: 16
+  issue_per_cycle: 2

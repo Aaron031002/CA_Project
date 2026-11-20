@@ -1,0 +1,50 @@
+# Conda environment for the CA_FP1_26 dense-MLP student handout.
+#
+# Covers every Python dependency used by this project:
+#   - pyyaml:  read by new_code/tools/gen_config_headers.py at `cmake ..`
+#              configure time. Inside the container (`bash start_env.sh`,
+#              USER_GUIDE.md §3.3) this env is already active.
+#   - numpy:   run_scripts/compare_output_mlp.py (numerical check),
+#              run_scripts/score_mlp.py (grading), and the students' own
+#              instruction generator scripts.
+#   - torch (CPU-only): trains/loads the 5 MLP configs' .pth checkpoints
+#              and provides compare_output_mlp.py's PyTorch reference
+#              forward pass. CPU-only build is intentional -- this project
+#              never trains at scale or needs a GPU, and the CPU build
+#              avoids a CUDA-version mismatch derailing setup on a laptop
+#              that doesn't have (or doesn't need) a working CUDA install.
+#
+# Every version is pinned exactly to the reference (grading) machine's
+# `ca_fp_2026` env (2026-11-03): Python from conda-forge, everything else
+# from pip, torch as the official CPU wheel. The Dockerfile asserts these
+# versions after building, so change both together.
+#
+# Setup:
+#   conda env create -f environment.yml
+#   conda activate ca_fp_2026
+#
+# Already-existing env, after a dependency list change:
+#   conda env update -f environment.yml --prune
+
+name: ca_fp_2026
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12.14
+  - pip
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cpu
+      - torch==2.14.0+cpu
+      - numpy==2.5.0
+      - PyYAML==6.0.3
+      # torch's own dependencies, pinned to the same versions as well
+      - filelock==4.0.3
+      - fsspec==2026.9.0
+      - Jinja2==3.1.6
+      - MarkupSafe==3.0.3
+      - mpmath==1.3.0
+      - networkx==3.7
+      - sympy==1.14.0
+      - typing_extensions==4.16.0
+      - setuptools==83.0.0

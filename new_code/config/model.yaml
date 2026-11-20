@@ -1,0 +1,16 @@
+# Model-shape parameters (gpt-oss-20b-like real architecture). Single source
+# of truth for values that were duplicated between DRAM_sim/dram_params.h
+# (KV-cache sizing) and inst_gen/gen_code/config_real.py (attention/MoE shape).
+# Phase 1 only wires the fields that were actually duplicated/colliding
+# (head_dim, n_heads_kv); the rest (d_model, n_experts, top_k, ...) are
+# consumed by Python codegen now and are staged here for a future Phase 2 pass
+# that threads them into C++ (e.g. Core/MainCtrl/main_ctrl_params.h::D_MODEL).
+
+d_model: 2880
+n_heads_q: 64
+n_heads_kv: 8       # == DRAM_sim/dram_params.h's HEAD_NUM (KV cache head count, same concept)
+head_dim: 64        # == DRAM_sim/dram_params.h's HEAD_DIM (per-head element count for KV cache)
+n_experts: 32
+top_k: 4
+ffn_dim: 2880       # == d_model for this model
+sliding_win: 128

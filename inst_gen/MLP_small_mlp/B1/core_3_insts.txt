@@ -1,0 +1,1 @@
+# Core 3 is idle in this example mapping.

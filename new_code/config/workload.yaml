@@ -1,0 +1,10 @@
+# Per-run / workload-sizing parameters. These bound how much KV-cache storage
+# DRAM_sim allocates and initializes (DataManager); the actual batch count for
+# a given generated test case is still a separate per-file override in
+# inst_gen/gen_code/config_real_*.py (e.g. BATCH=1/2/4/8/16/32/64), since each
+# generated instruction stream targets one specific batch size. This file's
+# kv_cache_batch_capacity is the upper bound the KV cache is provisioned for.
+
+kv_cache_batch_capacity: 64   # == DRAM_sim/dram_params.h's BATCH (max concurrent requests KV cache is sized for)
+max_seq_len: 1024             # maximum sequence length per request
+num_layers: 1                 # number of transformer layers simulated

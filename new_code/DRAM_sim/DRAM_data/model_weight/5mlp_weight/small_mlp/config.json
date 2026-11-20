@@ -1,0 +1,11 @@
+{
+  "small_mlp": {
+    "hidden_layers_dims": [
+      128,
+      64,
+      32,
+      16
+    ],
+    "description": "四個隱藏層，128, 64, 32, 16個神經元"
+  }
+}

@@ -1,0 +1,62 @@
+# Example mapping: a FORMAT DEMO that is deliberately slow.
+# Core 0 runs all 5 layers alone (cores 1-3 do nothing), and every instruction is
+# followed by a LOCAL_SYNC, so nothing overlaps. Use it only to check that your
+# environment works (score_mlp.py prints RESULT: PASS), then replace it with your own mapping.
+
+# Load the input image (row 0, cols 0..784) into on-chip buffer id 500000
+DMA DRAM read new_code/DRAM_sim/DRAM_data/in_tensor/mlp/in_B1.bin index 0 1 0 784 500000
+TCore LOCAL_SYNC
+
+# Layer 0: 784 -> 128: load the bias, then x*W, + bias, ReLU
+DMA DRAM read new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer0_bias.bin index 0 1 0 128 500001
+TCore LOCAL_SYNC
+Array NORMAL new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer0_weight.bin index 0 784 0 128 stride 128 500000 500002 1
+TCore LOCAL_SYNC
+Vector BIAS_ADD 128 500002 500001 500003 1 1
+TCore LOCAL_SYNC
+Vector RELU 128 500003 0 500004 1 0
+TCore LOCAL_SYNC
+
+# Layer 1: 128 -> 64: load the bias, then x*W, + bias, ReLU
+DMA DRAM read new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer1_bias.bin index 0 1 0 64 500005
+TCore LOCAL_SYNC
+Array NORMAL new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer1_weight.bin index 0 128 0 64 stride 64 500004 500006 1
+TCore LOCAL_SYNC
+Vector BIAS_ADD 64 500006 500005 500007 1 1
+TCore LOCAL_SYNC
+Vector RELU 64 500007 0 500008 1 0
+TCore LOCAL_SYNC
+
+# Layer 2: 64 -> 32: load the bias, then x*W, + bias, ReLU
+DMA DRAM read new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer2_bias.bin index 0 1 0 32 500009
+TCore LOCAL_SYNC
+Array NORMAL new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer2_weight.bin index 0 64 0 32 stride 32 500008 500010 1
+TCore LOCAL_SYNC
+Vector BIAS_ADD 32 500010 500009 500011 1 1
+TCore LOCAL_SYNC
+Vector RELU 32 500011 0 500012 1 0
+TCore LOCAL_SYNC
+
+# Layer 3: 32 -> 16: load the bias, then x*W, + bias, ReLU
+DMA DRAM read new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer3_bias.bin index 0 1 0 16 500013
+TCore LOCAL_SYNC
+Array NORMAL new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer3_weight.bin index 0 32 0 16 stride 16 500012 500014 1
+TCore LOCAL_SYNC
+Vector BIAS_ADD 16 500014 500013 500015 1 1
+TCore LOCAL_SYNC
+Vector RELU 16 500015 0 500016 1 0
+TCore LOCAL_SYNC
+
+# Layer 4: 16 -> 10: load the bias, then x*W, + bias, softmax
+DMA DRAM read new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer4_bias.bin index 0 1 0 10 500017
+TCore LOCAL_SYNC
+Array NORMAL new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer4_weight.bin index 0 16 0 10 stride 10 500016 500018 1
+TCore LOCAL_SYNC
+Vector BIAS_ADD 10 500018 500017 500019 1 1
+TCore LOCAL_SYNC
+Vector SOFTMAX 10 500019 0 500020 1 0
+TCore LOCAL_SYNC
+
+# Write the 10 class probabilities to the output file
+DMA DRAM write new_code/DRAM_sim/DRAM_data/out_tensor/mlp/small_mlp_out_B1.bin index 0 1 0 10 500020 0
+TCore LOCAL_SYNC
