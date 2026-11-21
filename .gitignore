@@ -150,3 +150,5 @@ new_code/test/*
 # Pre-generated per-core operation-table dumps for one specific config
 # (generated output data, regenerable from inst_gen, not source)
 new_code/map_table/
+
+docs/video

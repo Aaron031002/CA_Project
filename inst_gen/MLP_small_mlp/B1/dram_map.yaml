@@ -1,28 +1,27 @@
-# Example mapping: every file lives in core 0's local DRAM.
 version: 1
 num_cores: 4
 entries:
   - path: "new_code/DRAM_sim/DRAM_data/in_tensor/mlp/in_B1.bin"
-    owner: 0
-  - path: "new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer0_weight.bin"
-    owner: 0
+    owners: [0, 1, 2, 3]
   - path: "new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer0_bias.bin"
-    owner: 0
-  - path: "new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer1_weight.bin"
-    owner: 0
+    owners: [0, 1, 2, 3]
+  - path: "new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer0_weight.bin"
+    owners: [0, 1, 2, 3]
   - path: "new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer1_bias.bin"
+    owners: [2, 3]
+  - path: "new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer1_weight.bin"
+    owners: [0, 1, 2, 3]
+  - path: "new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer2_bias.bin"
     owner: 0
   - path: "new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer2_weight.bin"
-    owner: 0
-  - path: "new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer2_bias.bin"
+    owners: [0, 1]
+  - path: "new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer3_bias.bin"
     owner: 0
   - path: "new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer3_weight.bin"
     owner: 0
-  - path: "new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer3_bias.bin"
+  - path: "new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer4_bias.bin"
     owner: 0
   - path: "new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer4_weight.bin"
-    owner: 0
-  - path: "new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer4_bias.bin"
     owner: 0
   - path: "new_code/DRAM_sim/DRAM_data/out_tensor/mlp/small_mlp_out_B1.bin"
     owner: 0

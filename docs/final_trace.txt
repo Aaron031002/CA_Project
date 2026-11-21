@@ -1,0 +1,100 @@
+===== core 0
+    66  DMA DRAM read in_tensor/mlp/in_B1.bin index 0 1 0 176 500001
+   219  DMA DRAM read in_tensor/mlp/in_B1.bin index 0 1 176 784 500002
+   223  DMA DRAM read layer0_bias.bin index 0 1 0 32 500003
+   227  DMA DRAM read layer2_bias.bin index 0 1 0 32 500004
+   237  DMA DRAM read layer3_bias.bin index 0 1 0 16 500005
+   252  DMA DRAM read layer4_bias.bin index 0 1 0 10 500006
+   224  Array NORMAL layer0_weight.bin index 0 176 0 32 stride 128 500001 500007 1
+   649  Array NORMAL layer0_weight.bin index 176 784 0 32 stride 128 500002 500008 1
+   253  Vector BIAS_ADD 32 500007 500003 500009 1 1
+   272  Vector SUB 10 500006 500006 500010 0 0
+   292  Vector SUB 10 500010 500006 500011 0 0
+   309  Vector SIG 10 500006 0 500012 0 0
+   326  Vector SIG 10 500011 0 500013 1 0
+   343  Vector RECIP 10 500013 0 500014 1 0
+   363  Vector MUL 10 500012 500014 500015 1 1
+   380  Vector RECIP 10 500015 0 500016 0 0
+   672  Vector ADD 32 500009 500008 500017 1 1
+   695  Vector RELU 32 500017 0 500018 1 0
+   763  Array NORMAL layer1_weight.bin index 0 32 32 64 stride 64 500018 500019 0
+   828  Array NORMAL layer1_weight.bin index 0 32 0 32 stride 64 500018 500020 1
+   918  Array NORMAL layer4_weight.bin index 0 1 0 10 stride 10 500015 500021 1 wsrc cache 500016 1
+        DMA NoC send 1000001 500019 1 1
+   812  DMA NoC recv 1000002 500056 32
+   850  DMA NoC recv 1000005 500057 32
+   877  DMA NoC recv 1000004 500058 32
+   851  Vector ADD 32 500056 500020 500059 1 1
+   880  Vector ADD 32 500059 500057 500060 1 1
+   909  Vector ADD 32 500060 500058 500061 1 1
+   932  Vector RELU 32 500061 0 500062 1 0
+        Array NORMAL layer2_weight.bin index 0 32 0 32 stride 32 500062 500071 1
+  1049  DMA NoC recv 1000007 500072 32
+  1029  Vector BIAS_ADD 32 500071 500004 500073 1 1
+  1072  Vector ADD 32 500073 500072 500074 1 1
+  1095  Vector RELU 32 500074 0 500075 1 0
+  1153  Array NORMAL layer3_weight.bin index 0 32 0 16 stride 16 500075 500076 1
+  1176  Vector BIAS_ADD 16 500076 500005 500077 1 1
+  1195  Vector RELU 16 500077 0 500078 1 0
+  1245  Array NORMAL layer4_weight.bin index 0 16 0 10 stride 10 500078 500079 1
+  1262  Vector SUB 10 500010 500079 500080 1 0
+  1279  Vector SIG 10 500079 0 500081 1 0
+  1296  Vector SIG 10 500080 0 500082 1 0
+  1313  Vector RECIP 10 500082 0 500083 1 0
+  1333  Vector MUL 10 500081 500083 500084 1 1
+  1387  Array NORMAL layer4_weight.bin index 0 10 0 10 stride 10 500084 500085 0 wsrc cache 500021 1
+  1404  Vector RECIP 10 500085 0 500086 1 0
+  1424  Vector MUL 10 500084 500086 500087 1 1
+        DMA DRAM write out_tensor/mlp/small_mlp_out_B1.bin index 0 1 0 10 500087 1
+===== core 1
+    66  DMA DRAM read in_tensor/mlp/in_B1.bin index 0 1 0 176 500022
+   219  DMA DRAM read in_tensor/mlp/in_B1.bin index 0 1 176 784 500023
+   223  DMA DRAM read layer0_bias.bin index 0 1 32 64 500024
+   224  Array NORMAL layer0_weight.bin index 0 176 32 64 stride 128 500022 500025 1
+   649  Array NORMAL layer0_weight.bin index 176 784 32 64 stride 128 500023 500026 1
+   253  Vector BIAS_ADD 32 500025 500024 500027 1 1
+   672  Vector ADD 32 500027 500026 500028 1 1
+   695  Vector RELU 32 500028 0 500029 1 0
+   763  Array NORMAL layer1_weight.bin index 32 64 0 32 stride 64 500029 500030 0
+   828  Array NORMAL layer1_weight.bin index 32 64 32 64 stride 64 500029 500031 1
+        DMA NoC send 1000002 500030 0 1
+   812  DMA NoC recv 1000001 500063 32
+   850  DMA NoC recv 1000003 500064 32
+   877  DMA NoC recv 1000006 500065 32
+   851  Vector ADD 32 500063 500031 500066 1 1
+   880  Vector ADD 32 500066 500064 500067 1 1
+   909  Vector ADD 32 500067 500065 500068 1 1
+   932  Vector RELU 32 500068 0 500069 1 0
+        Array NORMAL layer2_weight.bin index 32 64 0 32 stride 32 500069 500070 1
+        DMA NoC send 1000007 500070 0 1
+===== core 2
+    66  DMA DRAM read in_tensor/mlp/in_B1.bin index 0 1 0 176 500032
+   219  DMA DRAM read in_tensor/mlp/in_B1.bin index 0 1 176 784 500033
+   223  DMA DRAM read layer0_bias.bin index 0 1 64 96 500034
+   227  DMA DRAM read layer1_bias.bin index 0 1 32 64 500035
+   224  Array NORMAL layer0_weight.bin index 0 176 64 96 stride 128 500032 500036 1
+   649  Array NORMAL layer0_weight.bin index 176 784 64 96 stride 128 500033 500037 1
+   253  Vector BIAS_ADD 32 500036 500034 500038 1 1
+   672  Vector ADD 32 500038 500037 500039 1 1
+   695  Vector RELU 32 500039 0 500040 1 0
+   763  Array NORMAL layer1_weight.bin index 64 96 32 64 stride 64 500040 500041 0
+   792  Vector ADD 32 500041 500035 500042 1 1
+   828  Array NORMAL layer1_weight.bin index 64 96 0 32 stride 64 500040 500043 1
+        DMA NoC send 1000003 500042 1 1
+        DMA NoC send 1000004 500043 0 1
+===== core 3
+    66  DMA DRAM read in_tensor/mlp/in_B1.bin index 0 1 0 176 500044
+   219  DMA DRAM read in_tensor/mlp/in_B1.bin index 0 1 176 784 500045
+   223  DMA DRAM read layer0_bias.bin index 0 1 96 128 500046
+   227  DMA DRAM read layer1_bias.bin index 0 1 0 32 500047
+   224  Array NORMAL layer0_weight.bin index 0 176 96 128 stride 128 500044 500048 1
+   649  Array NORMAL layer0_weight.bin index 176 784 96 128 stride 128 500045 500049 1
+   253  Vector BIAS_ADD 32 500048 500046 500050 1 1
+   672  Vector ADD 32 500050 500049 500051 1 1
+   695  Vector RELU 32 500051 0 500052 1 0
+   763  Array NORMAL layer1_weight.bin index 96 128 0 32 stride 64 500052 500053 0
+   792  Vector ADD 32 500053 500047 500054 1 1
+   828  Array NORMAL layer1_weight.bin index 96 128 32 64 stride 64 500052 500055 1
+        DMA NoC send 1000005 500054 0 1
+        DMA NoC send 1000006 500055 1 1
+TOTAL 1461
