@@ -7,51 +7,64 @@ DMA DRAM read new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer0_
 DMA DRAM read new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer2_bias.bin index 0 1 0 32 500004  # b2
 DMA DRAM read new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer3_bias.bin index 0 1 0 16 500005  # b3
 DMA DRAM read new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer4_bias.bin index 0 1 0 10 500006  # b4
-Array NORMAL new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer0_weight.bin index 0 176 0 32 stride 128 500001 500007 1  # L0 partial: x[0:176] @ W0[0:176, 0:32]
-Array NORMAL new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer0_weight.bin index 176 784 0 32 stride 128 500002 500008 1  # L0 partial: x[176:784] @ W0[176:784, 0:32]
-Vector BIAS_ADD 32 500007 500003 500009 1 1  # partial0 + b0 (off the critical path)
+DMA DRAM read new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer4_bias.bin index 0 1 0 5 500007  # b4[0:5] (this core's 5 classes)
+Array NORMAL new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer0_weight.bin index 0 176 0 32 stride 128 500001 500008 1  # L0 partial: x[0:176] @ W0[0:176, 0:32]
+Array NORMAL new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer0_weight.bin index 176 784 0 32 stride 128 500002 500009 1  # L0 partial: x[176:784] @ W0[176:784, 0:32]
+Vector BIAS_ADD 32 500008 500003 500010 1 1  # partial0 + b0 (off the critical path)
 # softmax constants, built while the Array is busy with layer 0
-Vector SUB 10 500006 500006 500010 0 0  # 0 (exact)
-Vector SUB 10 500010 500006 500011 0 0  # -b4
-Vector SIG 10 500006 0 500012 0 0  # sig(b4)
-Vector SIG 10 500011 0 500013 1 0  # sig(-b4)
-Vector RECIP 10 500013 0 500014 1 0  # 1+exp(b4)
-Vector MUL 10 500012 500014 500015 1 1  # exp(b4)
-Vector SIG 10 500010 0 500016 0 0  # 0.5 (exact)
-Vector ADD 10 500016 500016 500017 0 1  # 1
-Vector SUB 10 500010 500017 500018 0 1  # -1 (weight row of the outer product)
-Vector ADD_REDUCE 10 500015 0 500019 0 0 1  # K = sum_j exp(b4_j) (one value)
-Vector BIAS_ADD 1 500010 500019 500020 0 1  # K broadcast to 10 values
-Vector ADD 32 500009 500008 500021 1 1  # + partial1
-Vector RELU 32 500021 0 500022 1 0  # h0 slice (32 values)
+Vector SUB 10 500006 500006 500011 0 0  # 0 (exact), shape [1,10]
+Vector SUB 10 500011 500006 500012 0 0  # -b4
+Vector SIG 10 500006 0 500013 1 0  # sig(b4)
+Vector SIG 10 500012 0 500014 1 0  # sig(-b4)
+Vector RECIP 10 500014 0 500015 1 0  # 1+exp(b4)
+Vector MUL 10 500013 500015 500016 1 1  # exp(b4)
+Vector ADD_REDUCE 10 500016 0 500017 0 0 1  # K = sum_j exp(b4_j) (one value)
+Vector SUB 1 500017 500017 500018 0 0  # 0 (one value; ADD/SUB/MUL use the whole x buffer)
+Vector SUB 1 500018 500017 500019 1 1  # -K
+Vector SIG 1 500011 0 500020 0 0  # 0.5 (exact)
+Vector ADD 1 500020 500020 500021 0 1  # 1
+Vector ADD 1 500021 500021 500022 0 1  # 2
+Vector MUL 1 500022 500022 500023 0 1  # 2^2
+Vector MUL 1 500023 500023 500024 0 1  # 2^4
+Vector MUL 1 500024 500024 500025 0 1  # 2^8
+Vector MUL 1 500025 500025 500026 0 1  # 2^16
+Vector MUL 1 500026 500026 500027 0 1  # 2^32
+TMU view in 500011 0 out 500028 size 10 1  # 10 zeros as a column [10,1] (reshape, free)
+TMU concat in 500016 1 500019 1 out 500030 size 0 2  # [exp(b4), -K]  (11 values, 1-D)
+TMU view in 500027 1 out 500029 size 1 1  # 2^32 as [1,1]: the pad row of D
+Vector ADD 32 500010 500009 500031 1 1  # + partial1
+Vector RELU 32 500031 0 500032 1 0  # h0 slice (32 values)
 # layer 1: partial sums h0[0:32] @ W1[0:32, :]
-Array NORMAL new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer1_weight.bin index 0 32 32 64 stride 64 500022 500023 0  # L1 partial, output half B (cols 32..63)
-Array NORMAL new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer1_weight.bin index 0 32 0 32 stride 64 500022 500024 1  # L1 partial, output half A (cols 0..31)
-DMA NoC send 1000001 500023 1 1  # L1 partial half B -> core 1
+Array NORMAL new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer1_weight.bin index 0 32 32 64 stride 64 500032 500033 0  # L1 partial, output half B (cols 32..63)
+Array NORMAL new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer1_weight.bin index 0 32 0 32 stride 64 500032 500034 1  # L1 partial, output half A (cols 0..31)
+DMA NoC send 1000001 500033 1 1  # L1 partial half B -> core 1
 # collector of layer-1 half A
-DMA NoC recv 1000002 500059 32  # L1 partial half A from core 1
-DMA NoC recv 1000005 500060 32  # L1 partial half A from core 3
-DMA NoC recv 1000004 500061 32  # L1 partial half A from core 2
-Vector ADD 32 500059 500024 500062 1 1
-Vector ADD 32 500062 500060 500063 1 1
-Vector ADD 32 500063 500061 500064 1 1
-Vector RELU 32 500064 0 500065 1 0  # h1 half A
-# layer 2, 3, 4 and softmax
-Array NORMAL new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer2_weight.bin index 0 32 0 32 stride 32 500065 500074 1  # h1A @ W2[0:32, :]
-DMA NoC recv 1000007 500075 32  # h1B @ W2[32:64, :] from core 1
-Vector BIAS_ADD 32 500074 500004 500076 1 1
-Vector ADD 32 500076 500075 500077 1 1
-Vector RELU 32 500077 0 500078 1 0  # h2
-Array NORMAL new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer3_weight.bin index 0 32 0 16 stride 16 500078 500079 1
-Vector BIAS_ADD 16 500079 500005 500080 1 1
-Vector RELU 16 500080 0 500081 1 0  # h3
-Array NORMAL new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer4_weight.bin index 0 16 0 10 stride 10 500081 500082 1  # u = h3 @ W4
-Vector BIAS_ADD 10 500082 500006 500083 0 0  # z = u + b4 (runs while the Array builds R)
-Array NORMAL new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer4_weight.bin index 0 1 0 10 stride 10 500082 500084 0 df OS wsrc cache 500018 1  # R[j][i] = -u_j: outer product u (10x1) x (-1 row), output-stationary (K = 1)
-Vector BIAS_ADD 10 500084 500083 500085 1 1  # D[j][i] = z_i - u_j  (100 values)
-Vector SIG 100 500085 0 500086 1 0  # sig(z_i - u_j)
-Vector RECIP 100 500086 0 500087 1 0  # H[j][i] = 1 + exp(u_j - z_i)
-Array NORMAL new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer4_weight.bin index 0 10 0 10 stride 10 500015 500088 1 wsrc cache 500087 1  # S_i = sum_j exp(b4_j) H[j][i] = K + sum_j exp(z_j - z_i)
-Vector SUB 10 500088 500020 500089 1 1  # sum_j exp(z_j - z_i) = 1 / p_i
-Vector RECIP 10 500089 0 500090 1 0  # probabilities
-DMA DRAM write new_code/DRAM_sim/DRAM_data/out_tensor/mlp/small_mlp_out_B1.bin index 0 1 0 10 500090 1  # the 10 class probabilities
+DMA NoC recv 1000002 500093 32  # L1 partial half A from core 1
+DMA NoC recv 1000005 500094 32  # L1 partial half A from core 3
+DMA NoC recv 1000004 500095 32  # L1 partial half A from core 2
+Vector ADD 32 500093 500034 500096 1 1
+Vector ADD 32 500096 500094 500097 1 1
+Vector ADD 32 500097 500095 500098 1 1
+Vector RELU 32 500098 0 500099 1 0  # h1 half A
+Array NORMAL new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer2_weight.bin index 0 32 0 32 stride 32 500099 500107 1  # h1A @ W2[0:32, :]
+DMA NoC send 1000007 500107 1 0  # raw layer-2 partial -> core 1
+# layer 2 (both partials), 3, 4 and this core's half of the softmax
+DMA NoC recv 1000008 500109 32  # layer-2 partial from core 1
+Vector BIAS_ADD 32 500107 500004 500110 0 1  # own partial + b2 (while waiting)
+Vector ADD 32 500110 500109 500111 1 1
+Vector RELU 32 500111 0 500112 1 0  # h2
+Array NORMAL new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer3_weight.bin index 0 32 0 16 stride 16 500112 500113 1
+Vector BIAS_ADD 16 500113 500005 500114 1 1
+Vector RELU 16 500114 0 500115 1 0  # h3
+Array NORMAL new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer4_weight.bin index 0 16 0 10 stride 10 500115 500116 1  # u = h3 @ W4, shape [1,10]
+Vector SUB 10 500028 500116 500117 1 0  # -u as a column [10,1]
+TMU split in 500116 0 out 500118 500119 size 1 2  # u -> u[0:5], u[5:10]
+Vector BIAS_ADD 5 500118 500007 500120 1 1  # z_C = logits 0..4
+TMU concat in 500117 1 500029 1 out 500121 size 0 2  # [-u; 2^32]  (11x1)
+TMU view in 500121 1 out 500122 size 11 5  # R[j][i] = -u_j (row 10: 2^32): broadcast -> [11,5]
+Vector BIAS_ADD 5 500122 500120 500123 1 1  # D[j][i] = z_i - u_j  (55 values)
+Vector SIG 55 500123 0 500124 1 0  # sig(z_i - u_j); row 10: exactly 1
+Vector RECIP 55 500124 0 500125 1 0  # H[j][i] = 1 + exp(u_j - z_i); row 10: exactly 1
+Array NORMAL new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer4_weight.bin index 0 11 0 5 stride 10 500030 500126 1 wsrc cache 500125 1  # sum_j exp(b4_j) H[j][i] - K*1 = sum_j exp(z_j - z_i) = 1 / p_i
+Vector RECIP 5 500126 0 500127 1 0  # probabilities of classes 0..4
+DMA DRAM write new_code/DRAM_sim/DRAM_data/out_tensor/mlp/small_mlp_out_B1.bin index 0 1 0 5 500127 1  # output columns 0..4

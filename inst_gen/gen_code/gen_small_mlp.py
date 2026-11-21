@@ -2,8 +2,9 @@
 
 Writes inst_gen/MLP_small_mlp/B1/{core_0..3_insts.txt, dram_map.yaml}.
 
-    python3 inst_gen/gen_code/gen_small_mlp.py                     # submitted version (Vector SOFTMAX)
-    python3 inst_gen/gen_code/gen_small_mlp.py --softmax pairwise  # 1547 cycles, valid for every input
+    python3 inst_gen/gen_code/gen_small_mlp.py                     # submitted version: pairwise_2core, 1464 cycles
+    python3 inst_gen/gen_code/gen_small_mlp.py --softmax pairwise  # 1547 cycles (softmax on core 0 only)
+    python3 inst_gen/gen_code/gen_small_mlp.py --softmax builtin   # 1618 cycles (Vector SOFTMAX)
     python3 inst_gen/gen_code/gen_small_mlp.py --softmax accurate  # sigmoid softmax: NOT valid for every input
 
 Mesh (core_id = y*2 + x):   y=1 | 2 3        hops: 0-1, 0-2, 1-3, 2-3 = 1
@@ -26,14 +27,22 @@ Mapping (see docs/README_zh.md for the full explanation):
     -> h1A on core 0, h1B on core 1.
 
   Layer 2 (64->32): row split over cores 0 and 1 (h1A rows on core 0, h1B rows
-    on core 1); core 1 sends its 32-wide partial to core 0.
-  Layers 3, 4 and the softmax run on core 0; core 0 writes the output.
+    on core 1). pairwise_2core (default): the two raw 32-wide partials are EXCHANGED,
+    so cores 0 and 1 both form h2 and both run layers 3, 4; each then computes the
+    softmax for 5 of the 10 classes and writes those 5 outputs (see _tail_2core).
+    Other variants: core 1 sends its partial to core 0, which does layers 3, 4 and
+    the softmax alone and writes the output.
 
   Softmax: must be correct for every input in [0, 1]^784 (requirements §5 rule 3 and the
     TA clarification: any 784 values in [0, 1]).
   "builtin" (1618 cycles): BIAS_ADD b4 + Vector SOFTMAX.
 
-  "pairwise" (1547 cycles, default, the submitted version): p_i = 1 / sum_j exp(z_j - z_i). Only DIFFERENCES of logits are
+  "pairwise_2core" (1464 cycles, default, the submitted version): the same pairwise formula
+    as below, split over cores 0 and 1 (5 classes each; TMU split/broadcast instead of the
+    outer-product Array) and with an 11th "pad" row (2^32) whose coefficient -K removes the
+    final SUB. Details in _tail_2core.
+
+  "pairwise" (1547 cycles): p_i = 1 / sum_j exp(z_j - z_i). Only DIFFERENCES of logits are
     exponentiated, so nothing that matters overflows for any input:
         R[j][i] = -u_j                 one Array op: outer product u (10x1) x (-1 row), df OS
         D[j][i] = z_i - u_j            BIAS_ADD (z = u + b4 is computed while the Array works)
@@ -81,7 +90,7 @@ def other(h):
     return "B" if h == "A" else "A"
 
 
-def build(kchunks=(0, 176, 784), softmax="pairwise", C=40):
+def build(kchunks=(0, 176, 784), softmax="pairwise_2core", C=40):
     # Which layer-1 half each core computes first: the one that must travel
     # (and, for cores 2/3, the one that travels 2 hops) goes first.
     first = {0: "B", 1: "A", 2: "B", 3: "A"}
@@ -93,6 +102,9 @@ def build(kchunks=(0, 176, 784), softmax="pairwise", C=40):
     p = Prog()
     N0 = DIMS[1] // 4                 # 32 layer-0 columns per core
     qpart, b1h = {}, {}
+    two = softmax == "pairwise_2core"  # softmax split over cores 0 and 1 (5 classes each)
+    SMC = (0, 1) if two else (0,)      # cores that run layers 2-4 + (part of) the softmax
+    B2, B3, B4, BC, K2 = {}, {}, {}, {}, {}
     for c in range(4):
         cols = (N0 * c, N0 * (c + 1))
         p.c(c, f"===== core {c}: layer 0 columns {cols[0]}..{cols[1] - 1} =====")
@@ -103,10 +115,15 @@ def build(kchunks=(0, 176, 784), softmax="pairwise", C=40):
         for h in "AB":
             if (c, h) in prebias:
                 b1h[c, h] = p.dram_read(c, bfile(1), 0, 1, *HALF[h], comment=f"b1 half {h}")
+        if c in SMC:
+            B2[c] = p.dram_read(c, bfile(2), 0, 1, 0, 32, comment="b2")
+            B3[c] = p.dram_read(c, bfile(3), 0, 1, 0, 16, comment="b3")
+            B4[c] = p.dram_read(c, bfile(4), 0, 1, 0, 10, comment="b4")
+            if two:
+                BC[c] = p.dram_read(c, bfile(4), 0, 1, 5 * c, 5 * c + 5,
+                                    comment=f"b4[{5 * c}:{5 * c + 5}] (this core's 5 classes)")
         if c == 0:
-            b2 = p.dram_read(c, bfile(2), 0, 1, 0, 32, comment="b2")
-            b3 = p.dram_read(c, bfile(3), 0, 1, 0, 16, comment="b3")
-            b4 = p.dram_read(c, bfile(4), 0, 1, 0, 10, comment="b4")
+            b2, b3, b4 = B2[0], B3[0], B4[0]
 
         # ---- layer 0: one Array op per input chunk (weights streamed from local DRAM)
         parts = [p.array(c, wfile(0), k0, k1, cols[0], cols[1], 128, x, 1,
@@ -114,7 +131,30 @@ def build(kchunks=(0, 176, 784), softmax="pairwise", C=40):
                  for x, k0, k1 in zip(xs, kchunks[:-1], kchunks[1:])]
         acc = p.vec(c, "BIAS_ADD", N0, parts[0], b0, 1, 1, comment="partial0 + b0 (off the critical path)")
 
-        if c == 0 and softmax != "builtin":
+        if two and c in SMC:
+            p.c(c, "softmax constants, built while the Array is busy with layer 0")
+            b4c = B4[c]
+            z10 = p.vec(c, "SUB", 10, b4c, b4c, 0, 0, comment="0 (exact), shape [1,10]")
+            nb4 = p.vec(c, "SUB", 10, z10, b4c, 0, 0, comment="-b4")
+            sb = p.vec(c, "SIG", 10, b4c, 0, 1, 0, comment="sig(b4)")
+            snb = p.vec(c, "SIG", 10, nb4, 0, 1, 0, comment="sig(-b4)")
+            rsnb = p.vec(c, "RECIP", 10, snb, 0, 1, 0, comment="1+exp(b4)")
+            Eb = p.vec(c, "MUL", 10, sb, rsnb, 1, 1, comment="exp(b4)")
+            Ksc = p.new_id()
+            p.emit(c, f"Vector ADD_REDUCE 10 {Eb} 0 {Ksc} 0 0 1", "K = sum_j exp(b4_j) (one value)")
+            z1 = p.vec(c, "SUB", 1, Ksc, Ksc, 0, 0, comment="0 (one value; ADD/SUB/MUL use the whole x buffer)")
+            nK = p.vec(c, "SUB", 1, z1, Ksc, 1, 1, comment="-K")
+            half = p.vec(c, "SIG", 1, z10, 0, 0, 0, comment="0.5 (exact)")
+            one = p.vec(c, "ADD", 1, half, half, 0, 1, comment="1")
+            big = p.vec(c, "ADD", 1, one, one, 0, 1, comment="2")
+            for e in (2, 4, 8, 16, 32):
+                big = p.vec(c, "MUL", 1, big, big, 0, 1, comment=f"2^{e}")
+            zc, bigc, Eb11 = p.new_id(), p.new_id(), p.new_id()
+            p.tmu(c, "view", [(z10, 0)], [zc], [10, 1], comment="10 zeros as a column [10,1] (reshape, free)")
+            p.tmu(c, "concat", [(Eb, 1), (nK, 1)], [Eb11], [0, 2], comment="[exp(b4), -K]  (11 values, 1-D)")
+            p.tmu(c, "view", [(big, 1)], [bigc], [1, 1], comment="2^32 as [1,1]: the pad row of D")
+            K2[c] = dict(Eb11=Eb11, zc=zc, bigc=bigc)
+        if c == 0 and softmax != "builtin" and not two:
             p.c(c, "softmax constants, built while the Array is busy with layer 0")
             z10 = p.vec(c, "SUB", 10, b4, b4, 0, 0, comment="0 (exact)")
             nb4 = p.vec(c, "SUB", 10, z10, b4, 0, 0, comment="-b4")
@@ -194,6 +234,9 @@ def build(kchunks=(0, 176, 784), softmax="pairwise", C=40):
             e112 = p.vec(0, "MUL", 10, e96, pw2[16], 1, 1, comment="2^-112")
             eps = p.vec(0, "MUL", 10, e112, pw2[8], 1, 1, comment="eps = 2^-120")
 
+    if two:
+        return _tail_2core(p, h1, B2, B3, BC, K2)
+
     # ---- layer 2: row split over the two collectors, summed on core 0
     p.c(1, "layer 2 partial for rows 32..63, sent to core 0")
     q2B = p.array(1, wfile(2), 32, 64, 0, 32, 32, h1["B"], 1, comment="h1B @ W2[32:64, :]")
@@ -252,6 +295,59 @@ def build(kchunks=(0, 176, 784), softmax="pairwise", C=40):
     return p
 
 
+def _tail_2core(p, h1, B2, B3, BC, K2):
+    """Layers 2-4 on BOTH cores 0 and 1, then each core computes 5 of the 10 probabilities.
+
+    Layer 2 is still row-split (core 0: h1A rows, core 1: h1B rows), but now the two raw
+    partials are EXCHANGED, so both cores form h2 at the same time and both run layers 3, 4.
+    Softmax (pairwise, as in "pairwise"), core c owns classes C = 5c..5c+4:
+        nu       = 0 - u                     shape [10,1] (the zero operand is a [10,1] view)
+        u_C      = TMU split of u            (cheap: TMU costs elements/8 cycles)
+        z_C      = u_C + b4[C]
+        R[j][i]  = -u_j  (j < 10), 2^32 (j = 10)   TMU concat [-u; 2^32] + view broadcast -> [11,5]
+        D[j][i]  = z_i + R[j][i]              BIAS_ADD (55 values instead of 100)
+        H        = 1/sig(D) = 1 + exp(u_j - z_i);  row 10: sig(2^32 + z_i) = 1 exactly, so H = 1
+        S_i      = sum_{j<10} exp(b4_j) H[j][i] - K * 1 = sum_j exp(z_j - z_i)
+                   one Array op: input [exp(b4), -K] (11 values), weight H from the cache
+        p_i      = 1 / S_i                    written to output columns C by this core
+    Constants (exp(b4), -K, 2^32, a [10,1] zero) are built on both cores while layer 0 runs.
+    Note: ADD/SUB/MUL/BIAS_ADD process the WHOLE x buffer (dim only matters for SIG/RECIP
+    and as BIAS_ADD's period), and an op that reads the same id twice may truncate it only
+    on the second read (w_reserved), never the first.
+    """
+    q2 = {0: p.array(0, wfile(2), 0, 32, 0, 32, 32, h1["A"], 1, comment="h1A @ W2[0:32, :]"),
+          1: p.array(1, wfile(2), 32, 64, 0, 32, 32, h1["B"], 1, comment="h1B @ W2[32:64, :]")}
+    pk = {c: p.send(c, q2[c], [1 - c], truncate=0, comment=f"raw layer-2 partial -> core {1 - c}")
+          for c in (0, 1)}
+    for c in (0, 1):
+        p.c(c, "layer 2 (both partials), 3, 4 and this core's half of the softmax")
+        r = p.recv(c, pk[1 - c], [32], comment=f"layer-2 partial from core {1 - c}")
+        acc = p.vec(c, "BIAS_ADD", 32, q2[c], B2[c], 0, 1, comment="own partial + b2 (while waiting)")
+        acc = p.vec(c, "ADD", 32, acc, r, 1, 1)
+        h = p.vec(c, "RELU", 32, acc, 0, 1, 0, comment="h2")
+        y = p.array(c, wfile(3), 0, 32, 0, 16, 16, h, 1)
+        y = p.vec(c, "BIAS_ADD", 16, y, B3[c], 1, 1)
+        h = p.vec(c, "RELU", 16, y, 0, 1, 0, comment="h3")
+        u = p.array(c, wfile(4), 0, 16, 0, 10, 10, h, 1, comment="u = h3 @ W4, shape [1,10]")
+        k = K2[c]
+        nu = p.vec(c, "SUB", 10, k["zc"], u, 1, 0, comment="-u as a column [10,1]")
+        ulo, uhi = p.new_id(), p.new_id()
+        p.tmu(c, "split", [(u, 0)], [ulo, uhi], [1, 2], comment="u -> u[0:5], u[5:10]")
+        zC = p.vec(c, "BIAS_ADD", 5, (ulo, uhi)[c], BC[c], 1, 1, comment=f"z_C = logits {5 * c}..{5 * c + 4}")
+        nu11, R = p.new_id(), p.new_id()
+        p.tmu(c, "concat", [(nu, 1), (k["bigc"], 1)], [nu11], [0, 2], comment="[-u; 2^32]  (11x1)")
+        p.tmu(c, "view", [(nu11, 1)], [R], [11, 5], comment="R[j][i] = -u_j (row 10: 2^32): broadcast -> [11,5]")
+        D = p.vec(c, "BIAS_ADD", 5, R, zC, 1, 1, comment="D[j][i] = z_i - u_j  (55 values)")
+        G = p.vec(c, "SIG", 55, D, 0, 1, 0, comment="sig(z_i - u_j); row 10: exactly 1")
+        H = p.vec(c, "RECIP", 55, G, 0, 1, 0, comment="H[j][i] = 1 + exp(u_j - z_i); row 10: exactly 1")
+        S = p.new_id()
+        p.emit(c, f"Array NORMAL {wfile(4)} index 0 11 0 5 stride 10 {k['Eb11']} {S} 1 wsrc cache {H} 1",
+               "sum_j exp(b4_j) H[j][i] - K*1 = sum_j exp(z_j - z_i) = 1 / p_i")
+        prob = p.vec(c, "RECIP", 5, S, 0, 1, 0, comment=f"probabilities of classes {5 * c}..{5 * c + 4}")
+        p.dram_write(c, OUT_FILE, 0, 1, 5 * c, 5 * c + 5, prob, 1, comment=f"output columns {5 * c}..{5 * c + 4}")
+    return p
+
+
 HEADER = [
     "Generated by inst_gen/gen_code/gen_small_mlp.py -- edit the generator, not this file.",
     "small_mlp 784-128-64-32-16-10, batch 1, 2x2 mesh. No LOCAL_SYNC: units wait on cache ids.",
@@ -260,7 +356,7 @@ HEADER = [
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--softmax", choices=("builtin", "pairwise", "pairwise_safe", "accurate", "shift"), default="pairwise")
+    ap.add_argument("--softmax", choices=("builtin", "pairwise", "pairwise_2core", "pairwise_safe", "accurate", "shift"), default="pairwise_2core")
     ap.add_argument("--out", default=CASE_DIR, help="case folder to write (default: the official one)")
     ap.add_argument("--run", action="store_true", help="also run it once (inside the container)")
     a = ap.parse_args()
