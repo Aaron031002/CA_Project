@@ -416,7 +416,7 @@ Array (e^u · W') → RECIP → MUL = 機率 → DMA DRAM write 輸出
   所以 `SUB 1 <10 個值> <1 個值>` 會讀超出範圍，要用 1 個值的 buffer 當 x。
 * 同一個 id 當兩個運算元（例如 `MUL x x` 做平方）時，只能在**第二個**（w_reserved）設 truncate；設在第一個會在讀第二次前就被刪掉 → 卡死。
 
-也評估過、但不划算的：拆到 4 個 core（core 2、3 最快也要晚 23 cycles 才拿到 h2，總共只省約 6 cycles）、
+也試過、但不划算的：**拆到 3 個或 4 個 core**（產生器保留了 `--softmax pairwise_3core` / `pairwise_4core`，實測 1473 / 1495，都比 1464 慢）。原因：core 2、3 要等兩份第 2 層部分和，晚 35 cycles 才拿到 h2；第 2 層改成 multicast 後，送到 core 0 的那份也晚了 10 cycles；而每個 core 少算一個類別只省 1–2 cycles（短向量的 Vector 指令幾乎都是固定成本 14 cycles）。另外也評估過
 用 `Vector DOT_PRODUCT` 取代最後的 Array（固定成本 50，比 Array 慢）、讓第 4 層 Array 直接輸出 −u（權重改從 cache 讀反而多 12 cycles）。
 
 ---

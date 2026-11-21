@@ -7,7 +7,7 @@ DMA DRAM read new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer0_
 DMA DRAM read new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer2_bias.bin index 0 1 0 32 500038  # b2
 DMA DRAM read new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer3_bias.bin index 0 1 0 16 500039  # b3
 DMA DRAM read new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer4_bias.bin index 0 1 0 10 500040  # b4
-DMA DRAM read new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer4_bias.bin index 0 1 5 10 500041  # b4[5:10] (this core's 5 classes)
+DMA DRAM read new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer4_bias.bin index 0 1 5 10 500041  # b4[5:10] (this core's classes)
 Array NORMAL new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer0_weight.bin index 0 176 32 64 stride 128 500035 500042 1  # L0 partial: x[0:176] @ W0[0:176, 32:64]
 Array NORMAL new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer0_weight.bin index 176 784 32 64 stride 128 500036 500043 1  # L0 partial: x[176:784] @ W0[176:784, 32:64]
 Vector BIAS_ADD 32 500042 500037 500044 1 1  # partial0 + b0 (off the critical path)
@@ -47,8 +47,8 @@ Vector ADD 32 500103 500101 500104 1 1
 Vector ADD 32 500104 500102 500105 1 1
 Vector RELU 32 500105 0 500106 1 0  # h1 half B
 Array NORMAL new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer2_weight.bin index 32 64 0 32 stride 32 500106 500108 1  # h1B @ W2[32:64, :]
-DMA NoC send 1000008 500108 0 0  # raw layer-2 partial -> core 0
-# layer 2 (both partials), 3, 4 and this core's half of the softmax
+DMA NoC send 1000008 500108 0 0  # raw layer-2 partial -> cores [0]
+# layer 2 (both partials), 3, 4 and the softmax for classes 5..9
 DMA NoC recv 1000007 500128 32  # layer-2 partial from core 0
 Vector BIAS_ADD 32 500108 500038 500129 0 1  # own partial + b2 (while waiting)
 Vector ADD 32 500129 500128 500130 1 1
@@ -58,7 +58,7 @@ Vector BIAS_ADD 16 500132 500039 500133 1 1
 Vector RELU 16 500133 0 500134 1 0  # h3
 Array NORMAL new_code/DRAM_sim/DRAM_data/model_weight/mlp_bin/small_mlp/layer4_weight.bin index 0 16 0 10 stride 10 500134 500135 1  # u = h3 @ W4, shape [1,10]
 Vector SUB 10 500062 500135 500136 1 0  # -u as a column [10,1]
-TMU split in 500135 0 out 500137 500138 size 1 2  # u -> u[0:5], u[5:10]
+TMU split in 500135 0 out 500137 500138 size 1 2  # u -> 2 parts of 5
 Vector BIAS_ADD 5 500138 500041 500139 1 1  # z_C = logits 5..9
 TMU concat in 500136 1 500063 1 out 500140 size 0 2  # [-u; 2^32]  (11x1)
 TMU view in 500140 1 out 500141 size 11 5  # R[j][i] = -u_j (row 10: 2^32): broadcast -> [11,5]

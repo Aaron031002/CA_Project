@@ -102,8 +102,12 @@ def build(kchunks=(0, 176, 784), softmax="pairwise_2core", C=40):
     p = Prog()
     N0 = DIMS[1] // 4                 # 32 layer-0 columns per core
     qpart, b1h = {}, {}
-    two = softmax == "pairwise_2core"  # softmax split over cores 0 and 1 (5 classes each)
-    SMC = (0, 1) if two else (0,)      # cores that run layers 2-4 + (part of) the softmax
+    GROUPS = {"pairwise_2core": {0: (0, 5), 1: (5, 10)},
+              "pairwise_3core": {0: (0, 4), 1: (4, 8), 2: (8, 10)},
+              "pairwise_4core": {0: (0, 3), 1: (3, 6), 2: (6, 8), 3: (8, 10)}}
+    two = softmax in GROUPS            # softmax split over several cores (classes per core below)
+    grp = GROUPS.get(softmax, {0: (0, 10)})
+    SMC = tuple(grp)                   # cores that run layers 2-4 + (part of) the softmax
     B2, B3, B4, BC, K2 = {}, {}, {}, {}, {}
     for c in range(4):
         cols = (N0 * c, N0 * (c + 1))
@@ -120,8 +124,8 @@ def build(kchunks=(0, 176, 784), softmax="pairwise_2core", C=40):
             B3[c] = p.dram_read(c, bfile(3), 0, 1, 0, 16, comment="b3")
             B4[c] = p.dram_read(c, bfile(4), 0, 1, 0, 10, comment="b4")
             if two:
-                BC[c] = p.dram_read(c, bfile(4), 0, 1, 5 * c, 5 * c + 5,
-                                    comment=f"b4[{5 * c}:{5 * c + 5}] (this core's 5 classes)")
+                BC[c] = p.dram_read(c, bfile(4), 0, 1, *grp[c],
+                                    comment=f"b4[{grp[c][0]}:{grp[c][1]}] (this core's classes)")
         if c == 0:
             b2, b3, b4 = B2[0], B3[0], B4[0]
 
@@ -235,7 +239,7 @@ def build(kchunks=(0, 176, 784), softmax="pairwise_2core", C=40):
             eps = p.vec(0, "MUL", 10, e112, pw2[8], 1, 1, comment="eps = 2^-120")
 
     if two:
-        return _tail_2core(p, h1, B2, B3, BC, K2)
+        return _tail_2core(p, h1, B2, B3, BC, K2, grp)
 
     # ---- layer 2: row split over the two collectors, summed on core 0
     p.c(1, "layer 2 partial for rows 32..63, sent to core 0")
@@ -295,7 +299,7 @@ def build(kchunks=(0, 176, 784), softmax="pairwise_2core", C=40):
     return p
 
 
-def _tail_2core(p, h1, B2, B3, BC, K2):
+def _tail_2core(p, h1, B2, B3, BC, K2, grp):
     """Layers 2-4 on BOTH cores 0 and 1, then each core computes 5 of the 10 probabilities.
 
     Layer 2 is still row-split (core 0: h1A rows, core 1: h1B rows), but now the two raw
@@ -317,12 +321,23 @@ def _tail_2core(p, h1, B2, B3, BC, K2):
     """
     q2 = {0: p.array(0, wfile(2), 0, 32, 0, 32, 32, h1["A"], 1, comment="h1A @ W2[0:32, :]"),
           1: p.array(1, wfile(2), 32, 64, 0, 32, 32, h1["B"], 1, comment="h1B @ W2[32:64, :]")}
-    pk = {c: p.send(c, q2[c], [1 - c], truncate=0, comment=f"raw layer-2 partial -> core {1 - c}")
+    import math
+    cores = sorted(grp)
+    pk = {c: p.send(c, q2[c], [d for d in cores if d != c], truncate=0,
+                    comment=f"raw layer-2 partial -> cores {[d for d in cores if d != c]}")
           for c in (0, 1)}
-    for c in (0, 1):
-        p.c(c, "layer 2 (both partials), 3, 4 and this core's half of the softmax")
-        r = p.recv(c, pk[1 - c], [32], comment=f"layer-2 partial from core {1 - c}")
-        acc = p.vec(c, "BIAS_ADD", 32, q2[c], B2[c], 0, 1, comment="own partial + b2 (while waiting)")
+    part = math.gcd(*[v for r in grp.values() for v in r])          # TMU split granularity
+    near = {0: 0, 1: 1, 2: 0, 3: 1}                                 # 1-hop layer-2 partial
+    for c in cores:
+        c0, c1 = grp[c]
+        p.c(c, f"layer 2 (both partials), 3, 4 and the softmax for classes {c0}..{c1 - 1}")
+        if c in (0, 1):
+            r = p.recv(c, pk[1 - c], [32], comment=f"layer-2 partial from core {1 - c}")
+            acc = p.vec(c, "BIAS_ADD", 32, q2[c], B2[c], 0, 1, comment="own partial + b2 (while waiting)")
+        else:
+            ra = p.recv(c, pk[near[c]], [32], comment=f"layer-2 partial from core {near[c]} (1 hop)")
+            r = p.recv(c, pk[1 - near[c]], [32], comment=f"layer-2 partial from core {1 - near[c]} (2 hops)")
+            acc = p.vec(c, "BIAS_ADD", 32, ra, B2[c], 1, 1, comment="partial + b2")
         acc = p.vec(c, "ADD", 32, acc, r, 1, 1)
         h = p.vec(c, "RELU", 32, acc, 0, 1, 0, comment="h2")
         y = p.array(c, wfile(3), 0, 32, 0, 16, 16, h, 1)
@@ -331,20 +346,27 @@ def _tail_2core(p, h1, B2, B3, BC, K2):
         u = p.array(c, wfile(4), 0, 16, 0, 10, 10, h, 1, comment="u = h3 @ W4, shape [1,10]")
         k = K2[c]
         nu = p.vec(c, "SUB", 10, k["zc"], u, 1, 0, comment="-u as a column [10,1]")
-        ulo, uhi = p.new_id(), p.new_id()
-        p.tmu(c, "split", [(u, 0)], [ulo, uhi], [1, 2], comment="u -> u[0:5], u[5:10]")
-        zC = p.vec(c, "BIAS_ADD", 5, (ulo, uhi)[c], BC[c], 1, 1, comment=f"z_C = logits {5 * c}..{5 * c + 4}")
+        n = c1 - c0
+        parts = [p.new_id() for _ in range(10 // part)]
+        p.tmu(c, "split", [(u, 0)], parts, [1, 10 // part], comment=f"u -> {10 // part} parts of {part}")
+        mine = parts[c0 // part: c1 // part]
+        if len(mine) == 1:
+            uC = mine[0]
+        else:
+            uC = p.new_id()
+            p.tmu(c, "concat", [(m, 1) for m in mine], [uC], [1, len(mine)], comment=f"u[{c0}:{c1}]")
+        zC = p.vec(c, "BIAS_ADD", n, uC, BC[c], 1, 1, comment=f"z_C = logits {c0}..{c1 - 1}")
         nu11, R = p.new_id(), p.new_id()
         p.tmu(c, "concat", [(nu, 1), (k["bigc"], 1)], [nu11], [0, 2], comment="[-u; 2^32]  (11x1)")
-        p.tmu(c, "view", [(nu11, 1)], [R], [11, 5], comment="R[j][i] = -u_j (row 10: 2^32): broadcast -> [11,5]")
-        D = p.vec(c, "BIAS_ADD", 5, R, zC, 1, 1, comment="D[j][i] = z_i - u_j  (55 values)")
-        G = p.vec(c, "SIG", 55, D, 0, 1, 0, comment="sig(z_i - u_j); row 10: exactly 1")
-        H = p.vec(c, "RECIP", 55, G, 0, 1, 0, comment="H[j][i] = 1 + exp(u_j - z_i); row 10: exactly 1")
+        p.tmu(c, "view", [(nu11, 1)], [R], [11, n], comment=f"R[j][i] = -u_j (row 10: 2^32): broadcast -> [11,{n}]")
+        D = p.vec(c, "BIAS_ADD", n, R, zC, 1, 1, comment=f"D[j][i] = z_i - u_j  ({11 * n} values)")
+        G = p.vec(c, "SIG", 11 * n, D, 0, 1, 0, comment="sig(z_i - u_j); row 10: exactly 1")
+        H = p.vec(c, "RECIP", 11 * n, G, 0, 1, 0, comment="H[j][i] = 1 + exp(u_j - z_i); row 10: exactly 1")
         S = p.new_id()
-        p.emit(c, f"Array NORMAL {wfile(4)} index 0 11 0 5 stride 10 {k['Eb11']} {S} 1 wsrc cache {H} 1",
+        p.emit(c, f"Array NORMAL {wfile(4)} index 0 11 0 {n} stride 10 {k['Eb11']} {S} 1 wsrc cache {H} 1",
                "sum_j exp(b4_j) H[j][i] - K*1 = sum_j exp(z_j - z_i) = 1 / p_i")
-        prob = p.vec(c, "RECIP", 5, S, 0, 1, 0, comment=f"probabilities of classes {5 * c}..{5 * c + 4}")
-        p.dram_write(c, OUT_FILE, 0, 1, 5 * c, 5 * c + 5, prob, 1, comment=f"output columns {5 * c}..{5 * c + 4}")
+        prob = p.vec(c, "RECIP", n, S, 0, 1, 0, comment=f"probabilities of classes {c0}..{c1 - 1}")
+        p.dram_write(c, OUT_FILE, 0, 1, c0, c1, prob, 1, comment=f"output columns {c0}..{c1 - 1}")
     return p
 
 
@@ -356,7 +378,7 @@ HEADER = [
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--softmax", choices=("builtin", "pairwise", "pairwise_2core", "pairwise_safe", "accurate", "shift"), default="pairwise_2core")
+    ap.add_argument("--softmax", choices=("builtin", "pairwise", "pairwise_2core", "pairwise_3core", "pairwise_4core", "pairwise_safe", "accurate", "shift"), default="pairwise_2core")
     ap.add_argument("--out", default=CASE_DIR, help="case folder to write (default: the official one)")
     ap.add_argument("--run", action="store_true", help="also run it once (inside the container)")
     a = ap.parse_args()
