@@ -8,6 +8,11 @@ Writes <out dir>/<name>.bin (784 float32 in [0, 1], the in_B1.bin format) and in
   maxlogit_final              the end of that ascent (largest logit found)
   class<k>                    gradient ascent on logit k alone (k = 0..9)
   minlogit                    gradient descent on the largest logit (all logits as small as possible)
+  pair_<a><b>, triple_<abc>   two / three logits pushed up TOGETHER (kept ~0.5 apart): large logits AND
+                              several probabilities far above 1e-30, so the log-error check really bites
+  binary<i>                   random 0/1 images
+  gap<G>_<a><b>               z_a pushed up while z_b stays ~G below it (G = 60, 66): p_b ~ e^-G is just
+                              above the 1e-30 cut of the log check, at large logit scale
 For each image it records the float64 logits, the predicted class and the gap between the two
 largest probabilities (the TA note: grading inputs have this gap >= 1e-3).
 """
@@ -64,6 +69,20 @@ def main():
     for k in range(10):
         imgs[f"class{k}"], _ = ascend(lambda z, k=k: z[:, k], steps=300, seed=k + 1)
     imgs["minlogit"], _ = ascend(lambda z: -z.max(dim=1).values, steps=300, seed=99)
+    for a, b in ((3, 5), (2, 8), (0, 6), (7, 9), (1, 4)):
+        imgs[f"pair_{a}{b}"], _ = ascend(lambda z, a=a, b=b: torch.minimum(z[:, a], z[:, b] + 0.5),
+                                         steps=400, seed=100 + a)
+    for a, b, c in ((2, 3, 5), (0, 6, 8)):
+        imgs[f"triple_{a}{b}{c}"], _ = ascend(
+            lambda z, a=a, b=b, c=c: torch.minimum(torch.minimum(z[:, a], z[:, b] + 0.5), z[:, c] + 1.0),
+            steps=400, seed=200 + a)
+    for G, (a, b) in ((60, (3, 5)), (66, (2, 8)), (66, (0, 6))):
+        imgs[f"gap{G}_{a}{b}"], _ = ascend(
+            lambda z, a=a, b=b, G=G: torch.minimum(z[:, a], z[:, b] + G) - (z[:, a] - z[:, b] - G).abs(),
+            steps=500, seed=300 + a)
+    g = torch.Generator().manual_seed(7)
+    for i in range(3):
+        imgs[f"binary{i}"] = (torch.rand(784, generator=g) < 0.5).to(torch.float64)
     index = {}
     for name, x in imgs.items():
         x32 = x.to(torch.float32).clamp(0, 1)
@@ -72,9 +91,13 @@ def main():
             z = net(x32.to(torch.float64))
             p = torch.softmax(z, 0)
             top = torch.topk(p, 2).values
+        ps = torch.sort(p, descending=True).values
+        small = float(ps[ps > 1e-30][-1])
         index[name] = {"max_logit": round(z.max().item(), 2), "min_logit": round(z.min().item(), 2),
-                       "pred": int(z.argmax()), "top2_gap": float(top[0] - top[1])}
-        print(f"{name:16s} max logit {z.max().item():8.2f}  pred {int(z.argmax())}  top-2 gap {float(top[0] - top[1]):.3g}")
+                       "pred": int(z.argmax()), "top2_gap": float(top[0] - top[1]),
+                       "smallest_p_above_1e-30": small}
+        print(f"{name:16s} max logit {z.max().item():8.2f}  pred {int(z.argmax())}  top-2 gap {float(top[0] - top[1]):.3g}"
+              f"  smallest p > 1e-30: {small:.2e}")
     json.dump(index, open(os.path.join(out, "index.json"), "w"), indent=1)
 
 

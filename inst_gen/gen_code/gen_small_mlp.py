@@ -3,6 +3,7 @@
 Writes inst_gen/MLP_small_mlp/B1/{core_0..3_insts.txt, dram_map.yaml}.
 
     python3 inst_gen/gen_code/gen_small_mlp.py                     # submitted version (Vector SOFTMAX)
+    python3 inst_gen/gen_code/gen_small_mlp.py --softmax pairwise  # 1547 cycles, valid for every input
     python3 inst_gen/gen_code/gen_small_mlp.py --softmax accurate  # sigmoid softmax: NOT valid for every input
 
 Mesh (core_id = y*2 + x):   y=1 | 2 3        hops: 0-1, 0-2, 1-3, 2-3 = 1
@@ -28,9 +29,22 @@ Mapping (see docs/README_zh.md for the full explanation):
     on core 1); core 1 sends its 32-wide partial to core 0.
   Layers 3, 4 and the softmax run on core 0; core 0 writes the output.
 
-  Softmax: "builtin" (default, the submitted version): BIAS_ADD b4 + Vector SOFTMAX.
-    Correct for every input in [0, 1]^784, which the course requires (requirements
-    §5 rule 3 and the TA clarification: any 784 values in [0, 1]).
+  Softmax: must be correct for every input in [0, 1]^784 (requirements §5 rule 3 and the
+    TA clarification: any 784 values in [0, 1]).
+  "builtin" (1618 cycles): BIAS_ADD b4 + Vector SOFTMAX.
+
+  "pairwise" (1547 cycles, default, the submitted version): p_i = 1 / sum_j exp(z_j - z_i). Only DIFFERENCES of logits are
+    exponentiated, so nothing that matters overflows for any input:
+        R[j][i] = -u_j                 one Array op: outer product u (10x1) x (-1 row), df OS
+        D[j][i] = z_i - u_j            BIAS_ADD (z = u + b4 is computed while the Array works)
+        H[j][i] = 1/sig(D) = 1 + exp(u_j - z_i)                  SIG + RECIP on 100 values
+        S_i = sum_j exp(b4_j) H[j][i] = K + sum_j exp(z_j - z_i)  one Array op, K = sum exp(b4)
+        p_i = 1 / (S_i - K)
+    If p_i > 1e-30 every exponent is < ~72, so column i is exact. A column with a much larger
+    logit elsewhere (gap > ~88) gets inf in H, S_i = inf and p_i = 1/inf = 0 (correct: p_i < 1e-38).
+    For gaps > ~104, sig() underflows to exactly 0 and RECIP divides by 0: the simulator has an
+    assert for that, compiled out in the provided Release build (-DNDEBUG), where 1/0 = inf.
+  "pairwise_safe" (1589): the same, plus SIG + 2^-120 before RECIP, so it never divides by 0.
 
   "accurate" (kept for reference only -- it does NOT meet rule 3): no exp unit exists, but
         exp(u) = sigmoid(u) / sigmoid(-u)     (exact identity, accurate in float32)
@@ -67,7 +81,7 @@ def other(h):
     return "B" if h == "A" else "A"
 
 
-def build(kchunks=(0, 176, 784), softmax="builtin", C=40):
+def build(kchunks=(0, 176, 784), softmax="pairwise", C=40):
     # Which layer-1 half each core computes first: the one that must travel
     # (and, for cores 2/3, the one that travels 2 hops) goes first.
     first = {0: "B", 1: "A", 2: "B", 3: "A"}
@@ -108,7 +122,16 @@ def build(kchunks=(0, 176, 784), softmax="builtin", C=40):
             snb = p.vec(c, "SIG", 10, nb4, 0, 1, 0, comment="sig(-b4)")
             rsnb = p.vec(c, "RECIP", 10, snb, 0, 1, 0, comment="1+exp(b4)")
             Eb = p.vec(c, "MUL", 10, sb, rsnb, 1, 1, comment="exp(b4)")
-            Fb = p.vec(c, "RECIP", 10, Eb, 0, 0, 0, comment="exp(-b4)")
+            if softmax.startswith("pairwise"):
+                half = p.vec(c, "SIG", 10, z10, 0, 0, 0, comment="0.5 (exact)")
+                keep_half = softmax == "pairwise_safe"     # half is reused for eps
+                one = p.vec(c, "ADD", 10, half, half, 0, int(not keep_half), comment="1")
+                m1 = p.vec(c, "SUB", 10, z10, one, 0, 1, comment="-1 (weight row of the outer product)")
+                Ksc = p.new_id()
+                p.emit(c, f"Vector ADD_REDUCE 10 {Eb} 0 {Ksc} 0 0 1", "K = sum_j exp(b4_j) (one value)")
+                Kv = p.vec(c, "BIAS_ADD", 1, z10, Ksc, 0, 1, comment="K broadcast to 10 values")
+            else:
+                Fb = p.vec(c, "RECIP", 10, Eb, 0, 0, 0, comment="exp(-b4)")
             if softmax == "shift":
                 half = p.vec(c, "SIG", 10, z10, 0, 0, 0, comment="0.5 (exact)")
                 one = p.vec(c, "ADD", 10, half, half, 0, 1, comment="1")
@@ -129,6 +152,11 @@ def build(kchunks=(0, 176, 784), softmax="builtin", C=40):
         for pp in parts[1:]:
             acc = p.vec(c, "ADD", N0, acc, pp, 1, 1, comment="+ partial1")
         h0 = p.vec(c, "RELU", N0, acc, 0, 1, 0, comment="h0 slice (32 values)")
+        if c == 0 and softmax == "pairwise_safe":
+            p.c(c, "eps = 2^-120 for the pairwise softmax (Vector idle until the layer-1 partials arrive)")
+            pw2 = {1: half}
+            for k in (2, 4, 8, 16, 32, 64):
+                pw2[k] = p.vec(c, "MUL", 10, pw2[k // 2], pw2[k // 2], 0, int(k == 2), comment=f"2^-{k}")
 
         # ---- layer 1 partial sums for this core's 32 rows of W1
         p.c(c, f"layer 1: partial sums h0[{cols[0]}:{cols[1]}] @ W1[{cols[0]}:{cols[1]}, :]")
@@ -138,7 +166,7 @@ def build(kchunks=(0, 176, 784), softmax="builtin", C=40):
             if (c, h) in prebias:
                 qpart[c, h] = p.vec(c, "ADD", 32, qpart[c, h], b1h[c, h], 1, 1,
                                     comment=f"+ b1 half {h} (this partial travels 2 hops)")
-        if c == 0 and softmax != "builtin":
+        if c == 0 and softmax in ("accurate", "shift"):
             Wp = p.new_id()
             p.emit(c, f"Array NORMAL {wfile(4)} index 0 1 0 10 stride 10 {Eb} {Wp} 1 wsrc cache {Fb} 1",
                    "W'[j][i] = exp(b4_j) * exp(-b4_i): outer product, weight taken from the cache")
@@ -161,6 +189,10 @@ def build(kchunks=(0, 176, 784), softmax="builtin", C=40):
         for s in seq[2:]:
             acc = p.vec(col, "ADD", 32, acc, rv[s], 1, 1)
         h1[h] = p.vec(col, "RELU", 32, acc, 0, 1, 0, comment=f"h1 half {h}")
+        if col == 0 and softmax == "pairwise_safe":
+            e96 = p.vec(0, "MUL", 10, pw2[64], pw2[32], 1, 1, comment="2^-96 (Vector idle during layer 2)")
+            e112 = p.vec(0, "MUL", 10, e96, pw2[16], 1, 1, comment="2^-112")
+            eps = p.vec(0, "MUL", 10, e112, pw2[8], 1, 1, comment="eps = 2^-120")
 
     # ---- layer 2: row split over the two collectors, summed on core 0
     p.c(1, "layer 2 partial for rows 32..63, sent to core 0")
@@ -175,11 +207,30 @@ def build(kchunks=(0, 176, 784), softmax="builtin", C=40):
     y = p.array(0, wfile(3), 0, 32, 0, 16, 16, h, 1)
     y = p.vec(0, "BIAS_ADD", 16, y, b3, 1, 1)
     h = p.vec(0, "RELU", 16, y, 0, 1, 0, comment="h3")
-    u = p.array(0, wfile(4), 0, 16, 0, 10, 10, h, 1, comment="u = h3 @ W4 (b4 is folded into W')")
+    u = p.array(0, wfile(4), 0, 16, 0, 10, 10, h, 1,
+                comment="u = h3 @ W4" + ("" if softmax == "builtin" or softmax.startswith("pairwise")
+                                          else " (b4 is folded into W')"))
 
     if softmax == "builtin":
         z = p.vec(0, "BIAS_ADD", 10, u, b4, 1, 1, comment="logits")
         prob = p.vec(0, "SOFTMAX", 10, z, 0, 1, 0, comment="probabilities")
+    elif softmax.startswith("pairwise"):
+        # p_i = 1 / sum_j exp(z_j - z_i): only DIFFERENCES of logits are exponentiated, so nothing
+        # that matters can overflow, whatever the input (see the module docstring).
+        z = p.vec(0, "BIAS_ADD", 10, u, b4, 0, 0, comment="z = u + b4 (runs while the Array builds R)")
+        R = p.new_id()
+        p.emit(0, f"Array NORMAL {wfile(4)} index 0 1 0 10 stride 10 {u} {R} 0 df OS wsrc cache {m1} 1",
+               "R[j][i] = -u_j: outer product u (10x1) x (-1 row), output-stationary (K = 1)")
+        D = p.vec(0, "BIAS_ADD", 10, R, z, 1, 1, comment="D[j][i] = z_i - u_j  (100 values)")
+        G = p.vec(0, "SIG", 100, D, 0, 1, 0, comment="sig(z_i - u_j)")
+        if softmax == "pairwise_safe":
+            G = p.vec(0, "BIAS_ADD", 10, G, eps, 1, 1, comment="+ 2^-120: never divide by exactly 0")
+        H = p.vec(0, "RECIP", 100, G, 0, 1, 0, comment="H[j][i] = 1 + exp(u_j - z_i)")
+        S = p.new_id()
+        p.emit(0, f"Array NORMAL {wfile(4)} index 0 10 0 10 stride 10 {Eb} {S} 1 wsrc cache {H} 1",
+               "S_i = sum_j exp(b4_j) H[j][i] = K + sum_j exp(z_j - z_i)")
+        Sm = p.vec(0, "SUB", 10, S, Kv, 1, 1, comment="sum_j exp(z_j - z_i) = 1 / p_i")
+        prob = p.vec(0, "RECIP", 10, Sm, 0, 1, 0, comment="probabilities")
     else:
         if softmax == "accurate":
             nu = p.vec(0, "SUB", 10, z10, u, 1, 0, comment="-u")
@@ -209,7 +260,7 @@ HEADER = [
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--softmax", choices=("builtin", "accurate", "shift"), default="builtin")
+    ap.add_argument("--softmax", choices=("builtin", "pairwise", "pairwise_safe", "accurate", "shift"), default="pairwise")
     ap.add_argument("--out", default=CASE_DIR, help="case folder to write (default: the official one)")
     ap.add_argument("--run", action="store_true", help="also run it once (inside the container)")
     a = ap.parse_args()

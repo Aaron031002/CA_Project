@@ -1,13 +1,13 @@
 # Final Project 1：small_mlp 在 2×2 多核心加速器上的映射 — 完整說明
 
 > 最終（繳交）結果：`python3 run_scripts/score_mlp.py` →
-> **`RESULT: PASS  cores=4  latency=1618 cycles  (same on all 3 inputs: in_B1, mnist_2, random)`**
+> **`RESULT: PASS  cores=4  latency=1547 cycles  (same on all 3 inputs: in_B1, mnist_2, random)`**
 > （範例程式 3097 cycles、及格線 < 2000 cycles）
 >
 > **2026-11-21 更新**：助教補充說明規則 3 的「任何輸入」是指**任何 784 個 [0, 1] 的值**，評分還會用沒看過、不限隨機的圖片。
 > 原本用 sigmoid 自製的 softmax（1461 cycles）在最大 logit 超過約 88 時會算錯（實測見 7.3 節），不符合規定，
-> 所以繳交版改用內建 `Vector SOFTMAX`（1618 cycles）。下文第 5–6 節、第 8 節的 1461 與時間軸是自製 softmax 版本的歷史紀錄，
-> 第 0–4 層的映射兩版完全相同。
+> 所以先改用內建 `Vector SOFTMAX`（1618 cycles），之後再換成對任何輸入都正確、而且更快的 **pairwise softmax（1547 cycles，7.4 節）**，這是繳交版。
+> 下文第 5–6 節、第 8 節的 1461 與時間軸是最早自製 softmax 版本的歷史紀錄；第 0–4 層的映射各版完全相同。
 
 這份文件從「完全不知道要做什麼」開始，一步一步說明：
 
@@ -310,12 +310,14 @@ Array (e^u · W') → RECIP → MUL = 機率 → DMA DRAM write 輸出
 
 | 選項 | 延遲 | 適用範圍 |
 |---|---|---|
-| `--softmax builtin`（內建 SOFTMAX，**預設、繳交版**） | **1618** | 任何輸入 |
+| `--softmax pairwise`（成對差值，**預設、繳交版**，7.4 節） | **1547** | 任何輸入（依提供的 Release 編譯，見 7.4 節） |
+| `--softmax pairwise_safe`（同上，保證不除以 0） | 1589 | 任何輸入、任何編譯設定 |
+| `--softmax builtin`（內建 SOFTMAX） | 1618 | 任何輸入 |
 | `--softmax accurate` | 1461 | 最大 logit < ~88（**不符合規則 3**） |
 | `--softmax shift`（`e^{u+40} = 1/σ(−(u+40)) − 1`，少一條指令） | 1444 | 最大 logit < ~45（**不符合規則 3**） |
 
 三種都通過官方 `score_mlp.py` 的三張圖，但助教補充說明：規則 3 要求對**任何 784 個 [0, 1] 的值**都正確，評分還會用沒看過的圖。
-所以繳交版是 `builtin`。
+所以 `accurate`/`shift` 不能用；繳交版是 7.4 節的 `pairwise`。
 
 ### 7.3 實測：用極端圖片跑官方檢查
 
@@ -326,10 +328,47 @@ Array (e^u · W') → RECIP → MUL = 機率 → DMA DRAM write 輸出
 
 | 版本 | 結果 |
 |---|---|
-| `builtin`（繳交版，1618） | **19/19 PASS** |
+| `builtin`（1618） | **19/19 PASS** |
 | `accurate`（1461） | 最大 logit ≤ 82 的 6 張 PASS；**最大 logit ≥ 92 的 13 張全部 FAIL**（輸出出現非有限值） |
 
 和理論預測一致：σ(−u) 在 u > 約 88 時 float32 下溢為 0。
+
+### 7.4 更快又安全的自製 softmax：pairwise（成對差值）
+
+關鍵：只對 logit 的**差**取指數。`p_i = 1 / Σ_j e^{z_j − z_i}`。
+
+| 步驟 | 指令 | 完成（cycle） |
+|---|---|---|
+| `u = h3·W4` | Array | 1245 |
+| `z = u + b4`（和下一步同時做） | Vector BIAS_ADD | 1265 |
+| `R[j][i] = −u_j` | Array 外積（u 當 10×1 輸入 × −1 列，`df OS` 讓計算只要 4 cycles） | 1302 |
+| `D[j][i] = z_i − u_j` | Vector BIAS_ADD（100 個值） | 1344 |
+| `H = 1/σ(D) = 1 + e^{u_j − z_i}` | Vector SIG + RECIP（100 個值） | 1383 / 1422 |
+| `S_i = Σ_j e^{b_j}·H[j][i] = K + Σ_j e^{z_j − z_i}` | Array（e^{b} 當輸入、H 當權重） | 1473 |
+| `p_i = 1/(S_i − K)` | Vector SUB + RECIP | 1493 / 1510 |
+| 寫出 + 收尾 | DMA | **1547** |
+
+為什麼對任何輸入都安全：若 `p_i > 1e-30`，則所有 `z_j − z_i < 約 72`，第 i 欄沒有任何東西會溢位，結果精確；
+若某個 logit 比 z_i 大超過約 88，那欄會出現 inf，`S_i = inf`，`p_i = 1/inf = 0`——而真正的 p_i < 1e-38，檢查允許。
+
+**要注意的一點**：差距超過約 104 時，σ 會下溢成剛好 0，`RECIP` 等於除以 0。模擬器原始碼對此有 `assert`，
+但提供的 CMake 預設 Release（`-O3 -DNDEBUG`），assert 不會執行，1/0 = inf，結果仍正確（實測如上）。
+不想依賴這點的話，`pairwise_safe` 在 RECIP 前加上 2^-120，保證不會除以 0，代價多一條 100 值的 Vector 指令。
+
+| 版本 | cycles | 33 張圖（原圖＋32 張極端圖，每張再加 mnist_2、隨機圖） | 最大誤差（abs / log） |
+|---|---|---|---|
+| `builtin` | 1618 | 33/33 PASS | 4.8e-6 / 4.2e-5 |
+| `pairwise`（**繳交版**） | **1547** | 33/33 PASS | 7.6e-6 / 4.3e-5 |
+| `pairwise_safe` | 1589 | 33/33 PASS | 7.6e-6 / 4.0e-5 |
+
+32 張極端圖包含 logit 高達 185、多個大 logit 互相接近、以及「logit 很大且某類機率剛好在 1e-30 附近」（log 檢查真正會作用）的圖。
+其中 25 張的 logit 差距超過 104，也就是真的走到 RECIP(0) → inf 這條路，pairwise 全部通過。
+
+**為什麼繳交 `pairwise` 而不是 `pairwise_safe`**：USER_GUIDE §15 寫明助教用「未修改的 `score_mlp.py`、提供的模擬器」評分；
+提供的 `build.sh` 只跑 `cmake ..`，`new_code/CMakeLists.txt` 在沒指定時固定用 Release（`-DNDEBUG`），assert 不會執行。
+只有刻意改用 Debug 編譯才會在 RECIP(0) 中止，所以多花 42 cycles 換這個保險不划算。
+另外，`score_mlp.py` 用的三種輸入根本不會走到這條路：in_B1、mnist_2 的 logit 差距約 37，20 萬張均勻隨機圖最大也只有 62.4（< 88），
+只有刻意構造的極端圖才會出現 inf 或 RECIP(0)。
 
 ---
 
@@ -337,14 +376,14 @@ Array (e^u · W') → RECIP → MUL = 機率 → DMA DRAM write 輸出
 
 ### 8.1 正確性
 
-繳交版（builtin）：`score_mlp.py` PASS / 1618，三種輸入延遲相同；另外 19 張極端圖片（7.3 節）也全部 PASS。
+繳交版（pairwise）：`score_mlp.py` PASS / 1547，三種輸入延遲相同；另外 32 張極端圖片（7.3、7.4 節）也全部 PASS，最大誤差 abs 7.6e-6、log 4.3e-5（上限 1e-4 / 1e-3）。
 （自製 softmax 版當時跑 5 次也都 PASS / 1461，誤差：最大絕對誤差 1.8e-7、最大 log 誤差 1.3e-5——但它對極端圖片會失敗。）
 
 ### 8.2 效能
 
-* 繳交版：3097 → **1618 cycles**，比範例快 **1.91 倍**，低於及格線 2000。
+* 繳交版：3097 → **1547 cycles**，比範例快 **2.00 倍**，低於及格線 2000（內建 SOFTMAX 版是 1618）。
 * 自製 softmax 版（歷史）：1461 cycles；時間分配 L0 約 695（48%）、L1 237、L2–L4 313、softmax 179、收尾 37。
-  兩版差的 157 cycles 全部來自 softmax：內建 SOFTMAX 固定 313 cycles。
+  各版差異全部來自 softmax（u = h3·W4 在各版都是 1245 完成）：之後內建 SOFTMAX 版還要 373 cycles（SOFTMAX 本身固定 313）→ 1618；pairwise 版 302 cycles → 1547，而且對任何輸入都正確。
 
 ### 8.3 離理論極限還有多遠？
 
@@ -372,7 +411,7 @@ Array (e^u · W') → RECIP → MUL = 機率 → DMA DRAM write 輸出
 ```
 inst_gen/MLP_small_mlp/B1/          ← 要交的 5 個檔案（由產生器寫出）
 inst_gen/gen_code/
-  gen_small_mlp.py   最終產生器（預設 --softmax builtin = 繳交版；accurate|shift 只留作比較）
+  gen_small_mlp.py   最終產生器（預設 --softmax pairwise = 繳交版；pairwise_safe|builtin 也安全；accurate|shift 只留作比較）
   stress_inputs.py   產生極端測試圖（[0,1] 內、logit 很大或很小）
   stress_score.sh    在 repo 副本裡用這些圖跑官方 score_mlp.py（主機上執行）
   isa.py             指令產生小工具（自動配發唯一 id、自動產生 dram_map.yaml）
@@ -389,15 +428,21 @@ docs/video/          教學影片：build/small_mlp_tutorial.mp4（9 分 25 秒�
 
 ```bash
 python3 inst_gen/gen_code/gen_small_mlp.py           # 重新產生 5 個檔案
-python3 run_scripts/score_mlp.py                     # 官方檢查（應得 PASS / 1618）
+python3 run_scripts/score_mlp.py                     # 官方檢查（應得 PASS / 1547）
+bash run_scripts/run_mlp_configs.sh && python3 run_scripts/compare_output_mlp.py   # 只跑 in_B1 並比對（PASS）
+# 注意：score_mlp.py 最後一次執行用的是隨機圖，跑完後輸出檔裝的是「隨機圖的結果」。
+# 這時直接跑 compare_output_mlp.py 會拿它去和 in_B1 的答案比，必定 FAIL（例如 sim=[8], ref=[7]）；
+# 要先用 run_mlp_configs.sh 重跑 in_B1，或加 --input 指定那張隨機圖（在 sim_logs/score_*/inputs/random.bin）。
 python3 inst_gen/gen_code/trace.py inst_gen/MLP_small_mlp/B1   # 看時間軸
 ```
 
 繳交（`[id]` 換成組號）：zip 最上層直接放 5 個檔案、不要有資料夾：
 
 ```bash
-cd inst_gen/MLP_small_mlp/B1 && zip ../../../Group_[id]_FP1_code.zip core_0_insts.txt core_1_insts.txt core_2_insts.txt core_3_insts.txt dram_map.yaml
+cd inst_gen/MLP_small_mlp/B1 && python3 -m zipfile -c ../../../Group_[id]_FP1_code.zip core_0_insts.txt core_1_insts.txt core_2_insts.txt core_3_insts.txt dram_map.yaml && python3 -m zipfile -l ../../../Group_[id]_FP1_code.zip
 ```
+
+（主機上沒有 `zip` 指令，所以用 Python 內建的 zipfile；最後的 `-l` 會列出內容，應該剛好是這 5 個檔、沒有資料夾。）
 
 報告寫在 `Group_[id]_FP1_report.docx` 模板、輸出成 PDF（本文件第 4–8 節可以直接當報告素材）。
 
@@ -405,8 +450,8 @@ cd inst_gen/MLP_small_mlp/B1 && zip ../../../Group_[id]_FP1_code.zip core_0_inst
 
 ## 10. 限制與誠實聲明
 
-* **softmax**：繳交版用內建 SOFTMAX，對任何 [0,1] 輸入都正確（7.3 節實測）。自製的 `accurate`/`shift` 版對最大 logit > ~88（或 ~45）的輸入會算錯，不符合規則 3，只留作比較。
-* **影片**（`docs/video/`）是在改版前做的，片中的最終結果仍是 1461，需要更新。
+* **softmax**：繳交版用 pairwise（7.4 節），對任何 [0,1] 輸入都正確（32 張極端圖實測）；差距 > ~104 時依賴提供的 Release 編譯讓 RECIP(0) = inf，若要完全不依賴編譯設定可改用 `pairwise_safe`（1589）。自製的 `accurate`/`shift` 版對最大 logit > ~88（或 ~45）的輸入會算錯，不符合規則 3，只留作比較。
+* **影片**（`docs/video/`）是在改版前做的，片中的最終結果仍是 1461（sigmoid 版 softmax），需要更新為 pairwise / 1547。
 * **模擬器怪癖**：TMU 在「讀取輸入」期間不會被標成 busy；如果程式最後一個動作是 TMU，模擬可能提早被判定結束。我的程式不用 TMU，不受影響。
 * 延遲模型是從這份模擬器讀出來的，不代表真實硬體。
 * 這份作業的程式與分析是我（AI）完成的；請你讀懂後用自己的話寫報告，並遵守課程對 AI 使用的規定。
